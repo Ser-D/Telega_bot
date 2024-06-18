@@ -3,82 +3,80 @@ from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from bs4 import BeautifulSoup
-import sqlite3
+import aiosqlite
 from datetime import datetime
+import asyncio
 
-# Функція для парсингу кількості вакансій з використанням Selenium
-def get_vacancy_count():
-    url = 'https://www.work.ua/jobs-junior/'
-    driver = webdriver.Safari()
-    driver.get(url)
+class VacancyParser:
+    def __init__(self):
+        self.db_path = 'vacancies.db'
 
-    try:
-        # Чекати, поки елемент з'явиться на сторінці
-        element = WebDriverWait(driver, 20).until(
-            EC.presence_of_element_located((By.CSS_SELECTOR, "div.mt-8.text-default-7 span"))
-        )
+    async def create_tables(self):
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute('''
+                CREATE TABLE IF NOT EXISTS vacancies (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    timestamp DATETIME,
+                    count INTEGER,
+                    change INTEGER
+                )
+            ''')
+            await db.commit()
 
-        html = driver.page_source
-        soup = BeautifulSoup(html, 'html.parser')
+    def get_vacancy_count(self):
+        url = 'https://robota.ua/zapros/junior/ukraine'
+        driver = webdriver.Safari()
+        driver.get(url)
 
-        # Знайти елемент, який містить кількість вакансій
-        count_element = soup.find('div', class_='mt-8 text-default-7').find('span')
-        if count_element:
-            count_text = count_element.text.strip().split()[0]
-            count = int(count_text.replace('\u202f', ''))  # Видалити неявні пробіли
+        try:
+            # Чекати, поки елемент з'явиться на сторінці
+            element = WebDriverWait(driver, 20).until(
+                EC.presence_of_element_located((By.XPATH,
+                                                "/html/body/app-root/div/alliance-jobseeker-vacancies-root-page/div/alliance-jobseeker-desktop-vacancies-page/main/section/div/div/lib-desktop-top-info/div/div[1]"))
+            )
+
+            html = driver.page_source
+            print(html)  # Додано для виведення HTML-коду сторінки
+            soup = BeautifulSoup(html, 'html.parser')
+
+            # Знайти елемент, який містить кількість вакансій
+            count_element = soup.find('div', class_='santa-typo-h2 santa-mr-10').text.strip()
+            count = int(''.join(filter(str.isdigit, count_element)))  # Видалення всіх нецифрових символів
+            print(f"Parsed vacancy count: {count}")  # Додано для налагодження
             return count
-        else:
-            print("Element with class 'mt-8 text-default-7' not found.")
+        except Exception as e:
+            print(f"Error occurred: {e}")
             return None
-    except Exception as e:
-        print(f"Error occurred: {e}")
-        return None
-    finally:
-        driver.quit()
+        finally:
+            driver.quit()  # Закриття браузера у будь-якому випадку
 
-# Функція для оновлення структури таблиці
-def update_table():
-    conn = sqlite3.connect('vacancies.db')
-    c = conn.cursor()
-    try:
-        c.execute('ALTER TABLE vacancies ADD COLUMN change INTEGER')
-    except sqlite3.OperationalError:
-        pass  # Стовпець вже існує
-    conn.commit()
-    conn.close()
+    async def save_to_db(self, count):
+        async with aiosqlite.connect(self.db_path) as db:
+            # Отримати попереднє значення кількості вакансій
+            async with db.execute('SELECT count FROM vacancies ORDER BY timestamp DESC LIMIT 1') as cursor:
+                previous_count = await cursor.fetchone()
+            if previous_count:
+                previous_count = previous_count[0]
+                change = count - previous_count
+            else:
+                change = 0
 
-# Функція для збереження даних в SQLite
-def save_to_db(count):
-    if count is None:
-        print("No data to save to database.")
-        return
+            timestamp = datetime.now()
+            await db.execute("INSERT INTO vacancies (timestamp, count, change) VALUES (?, ?, ?)",
+                             (timestamp, count, change))
+            await db.commit()
+            print(f"Saved to DB: {timestamp}, {count}, {change}")  # Додано для налагодження
 
-    conn = sqlite3.connect('vacancies.db')
-    c = conn.cursor()
-    c.execute('''CREATE TABLE IF NOT EXISTS vacancies
-                 (timestamp DATETIME, count INTEGER, change INTEGER)''')
-
-    # Отримати попереднє значення кількості вакансій
-    c.execute('SELECT count FROM vacancies ORDER BY timestamp DESC LIMIT 1')
-    previous_count = c.fetchone()
-    if previous_count:
-        previous_count = previous_count[0]
-        change = count - previous_count
-    else:
-        change = 0
-
-    timestamp = datetime.now()
-    c.execute("INSERT INTO vacancies (timestamp, count, change) VALUES (?, ?, ?)", (timestamp, count, change))
-    conn.commit()
-    conn.close()
+    async def main_parser(self):
+        await self.create_tables()
+        while True:
+            count = self.get_vacancy_count()
+            if count is not None:
+                await self.save_to_db(count)
+                print(f"Кількість вакансій: {count}")
+            await asyncio.sleep(3600)  # Чекати 1 годину перед наступним парсингом
 
 # Одноразовий запуск парсера для тестування
-def test_parser():
-    update_table()
-    count = get_vacancy_count()
-    save_to_db(count)
-    if count is not None:
-        print(f"Кількість вакансій: {count}")
-
 if __name__ == "__main__":
-    test_parser()
+    parser = VacancyParser()
+    asyncio.run(parser.main_parser())
